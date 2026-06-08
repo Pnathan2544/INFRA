@@ -1,23 +1,298 @@
-# TODO: Implement CI/CD pipeline
-# 
-# This workflow should ensure code quality before deployment.
-# Consider: What checks are necessary? How do you gate deployments?
-#           How can someone verify a deployment occurred?
-#
-# The eval-runner service exists for a reason. The deployment/ directory
-# contains a manifest that may be useful.
-
+# This workflow provides the required quality-gate check. GitHub branch
+# protection must require the `quality-gate` job before merges; YAML can fail a
+# check, but repository settings are what actually block a broken PR.
 name: CI/CD Pipeline
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # CI owns these thresholds explicitly so the quality policy cannot drift if
+  # service/container defaults change later.
+  MIN_GOLDEN_ACCURACY: "0.90"
+  MAX_GOLDEN_REJECTION_RATE: "0.05"
+  MIN_ADVERSARIAL_REJECTION_RATE: "0.60"
+  DOCKER_BUILDKIT: "1"
+  COMPOSE_DOCKER_CLI_BUILD: "1"
 
 jobs:
-  # TODO: Design and implement your pipeline
-  placeholder:
+  quality-gate:
+    name: quality-gate
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
-      - run: exit 1
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Docker Compose CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if command -v docker-compose >/dev/null 2>&1; then
+            docker-compose version
+            exit 0
+          fi
+
+          if ! docker compose version >/dev/null 2>&1; then
+            echo "Neither docker-compose nor docker compose is available on this runner." >&2
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/docker-compose-bin"
+          cat > "$RUNNER_TEMP/docker-compose-bin/docker-compose" <<'EOF'
+          #!/usr/bin/env bash
+          exec docker compose "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/docker-compose-bin/docker-compose"
+          echo "$RUNNER_TEMP/docker-compose-bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/docker-compose-bin:$PATH"
+          docker-compose version
+
+      - name: Validate repository structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          required_paths=(
+            "Makefile"
+            "docker-compose.yml"
+            "agent-api/Dockerfile"
+            "agent-api/app.py"
+            "eval-runner/Dockerfile"
+            "eval-runner/runner.py"
+            "deployment/manifest.yml"
+          )
+
+          for path in "${required_paths[@]}"; do
+            if [[ ! -e "$path" ]]; then
+              echo "Missing required path: $path" >&2
+              exit 1
+            fi
+          done
+
+          jq --version
+          docker-compose config >/dev/null
+
+      - name: Build and start stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          make up
+          docker-compose ps
+
+      - name: Wait for Agent API
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --retry 30 --retry-all-errors --retry-delay 1 \
+            http://localhost:8080/healthz >/dev/null
+
+      - name: Run health and smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          make health
+          make test-ask
+          make test-reject
+
+      - name: Run eval runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The eval runner is the behavioral quality gate for this agent: it
+          # validates accepted/rejected behavior, not just container startup.
+          make eval
+
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.run_id }}-${{ github.sha }}
+          path: eval-results/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Stop stack
+        if: always()
+        shell: bash
+        run: |
+          make down || true
+
+  package-deployment:
+    name: package-deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: quality-gate
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[skip ci]')
+    permissions:
+      contents: write
+    outputs:
+      artifact_name: ${{ steps.trace.outputs.artifact_name }}
+      committed: ${{ steps.commit.outputs.committed }}
+      deployed_at: ${{ steps.trace.outputs.deployed_at }}
+      manifest_path: ${{ steps.trace.outputs.manifest_path }}
+      short_sha: ${{ steps.trace.outputs.short_sha }}
+      source_branch: ${{ steps.trace.outputs.source_branch }}
+      source_sha: ${{ steps.trace.outputs.source_sha }}
+
+    steps:
+      - name: Check out source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Generate deployment manifest
+        id: trace
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          short_sha="${SOURCE_SHA::7}"
+          deployed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          manifest_path="deployment/manifest.yml"
+          artifact_name="deployment-manifest-${short_sha}"
+
+          history_rows=""
+          if [[ -f "$manifest_path" ]]; then
+            history_rows="$(grep '^# | 20' "$manifest_path" || true)"
+          fi
+
+          mkdir -p deployment
+
+          # This packages a deployment candidate instead of pretending to deploy:
+          # the repo has no registry, cluster, or deploy credentials to target.
+          cat > "$manifest_path" <<EOF
+          # =============================================================
+          # Deployment Manifest
+          # =============================================================
+          # This file represents the production deployment candidate created by CI/CD.
+          # The manifest uses the source commit SHA as the conceptual Docker image tag,
+          # giving a traceable chain: commit SHA -> image tag -> manifest -> runtime.
+          # =============================================================
+
+          apiVersion: v1
+          kind: deployment
+          metadata:
+            name: agent-api
+            environment: production
+            commit_sha: "${SOURCE_SHA}"
+            short_sha: "${short_sha}"
+            deployed_by: "${GITHUB_ACTOR}"
+            deployed_at: "${deployed_at}"
+            workflow_run_id: "${GITHUB_RUN_ID}"
+            workflow_run_number: "${GITHUB_RUN_NUMBER}"
+            source_branch: "${SOURCE_BRANCH}"
+
+          spec:
+            replicas: 2
+
+            container:
+              name: agent-api
+              image_tag: "${SOURCE_SHA}"
+              port: 8080
+
+              env:
+                - name: PROMPT_VERSION
+                  value: "v1.0.0"
+
+              resources:
+                cpu: "500m"
+                memory: "512Mi"
+
+              healthcheck:
+                path: /healthz
+                interval: 10s
+                timeout: 5s
+
+          # Deployment History (newest first, updated by CI/CD):
+          # -------------------------------------------------------------
+          # | Timestamp | Commit SHA | Deployed By |
+          # -------------------------------------------------------------
+          # | ${deployed_at} | ${SOURCE_SHA} | ${GITHUB_ACTOR} |
+          ${history_rows}
+          # -------------------------------------------------------------
+          EOF
+
+          echo "artifact_name=${artifact_name}" >> "$GITHUB_OUTPUT"
+          echo "deployed_at=${deployed_at}" >> "$GITHUB_OUTPUT"
+          echo "manifest_path=${manifest_path}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "source_branch=${SOURCE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload deployment manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.trace.outputs.artifact_name }}
+          path: ${{ steps.trace.outputs.manifest_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit deployment manifest
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add deployment/manifest.yml
+          if git diff --cached --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # [skip ci] prevents the manifest update commit from starting a CI loop.
+          git commit -m "chore(deploy): update manifest for ${{ steps.trace.outputs.short_sha }} [skip ci]"
+
+          # No force push: if main moved after this run started, fail visibly
+          # instead of recording a stale deployment candidate.
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "committed=true" >> "$GITHUB_OUTPUT"
+
+  deployment-summary:
+    name: deployment-summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: package-deployment
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[skip ci]')
+
+    steps:
+      - name: Write deployment summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Deployment Candidate"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Source commit | \`${{ needs.package-deployment.outputs.source_sha }}\` |"
+            echo "| Short SHA | \`${{ needs.package-deployment.outputs.short_sha }}\` |"
+            echo "| Source branch | \`${{ needs.package-deployment.outputs.source_branch }}\` |"
+            echo "| Manifest | \`${{ needs.package-deployment.outputs.manifest_path }}\` |"
+            echo "| Artifact | \`${{ needs.package-deployment.outputs.artifact_name }}\` |"
+            echo "| Manifest committed | \`${{ needs.package-deployment.outputs.committed }}\` |"
+            echo "| Prepared by | \`${{ github.actor }}\` |"
+            echo "| Prepared at | \`${{ needs.package-deployment.outputs.deployed_at }}\` |"
+            echo "| Workflow run | \`${{ github.run_id }} #${{ github.run_number }}\` |"
+            echo ""
+            echo "No live deployment was performed. This workflow prepares a traceable deployment candidate because the repository does not define a real deployment target."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,37 +1,194 @@
+# Prometheus alerts are the runtime counterpart to the CI quality gate:
+# CI evals prove behavior before deployment, while these rules watch for
+# production behavior that needs human attention after deployment.
+#
+# Metric contract used here:
+# - Existing: agent_requests_total{route, prompt_version}
+# - Existing: agent_request_latency_seconds_bucket{route, prompt_version, le}
+# - Task 3:  agent_rejections_total{prompt_version, reason}
+
 groups:
-  - name: agent-api-alerts
+  - name: agent-api-availability
     rules:
       - alert: AgentAPIDown
-        expr: up{job="agent-api"} == 0
+        expr: up{job="agent-api"} == 0 or absent(up{job="agent-api"})
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "Agent API is down"
-          description: "The agent API has been unreachable for more than 1 minute."
+          summary: "Agent API is unavailable"
+          description: "Prometheus cannot scrape the agent-api target, or the target is missing from discovery, for more than 1 minute."
+          investigation: "Check docker compose service status, agent-api logs, Prometheus targets, and the /healthz endpoint."
+          dashboard: "Grafana Agent Monitoring: service availability"
 
-      # TODO: Implement alerting for abnormal rejection rates
-      # Consider: What rejection rate is "normal" for this system?
-      #           How do you distinguish a real problem from noise?
-      # 
-      # Observe the running system before setting thresholds.
+  - name: agent-api-traffic
+    rules:
+      # Zero /ask traffic is alert-worthy in this repo because the traffic
+      # generator is intentionally continuous. In a customer-facing app, quiet
+      # periods may be normal and this threshold would need a traffic schedule.
+      - alert: AskTrafficAbsent
+        expr: |
+          (
+            sum(increase(agent_requests_total{route="/ask"}[5m])) < 1
+          )
+          or
+          absent_over_time(agent_requests_total{route="/ask"}[5m])
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No /ask traffic observed"
+          description: "No /ask requests have been observed for a sustained period, even though synthetic traffic should be continuous."
+          investigation: "Check traffic-generator logs, Docker Compose networking, /ask route behavior, and whether request metric labels changed."
+          dashboard: "Grafana Agent Monitoring: request throughput"
+
+  - name: agent-api-latency
+    rules:
+      # Volume guards avoid p95 alerts from one or two slow requests during a
+      # low-sample interval. The warning catches user-visible slowness; the
+      # critical alert waits longer and uses a higher threshold to reduce pages
+      # from brief startup or CPU-contention spikes.
+      - alert: AskLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(agent_request_latency_seconds_bucket{route="/ask"}[5m])
+            )
+          ) > 1
+          and
+          sum(increase(agent_requests_total{route="/ask"}[5m])) >= 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High /ask latency"
+          description: "p95 /ask latency has been above 1 second for 5 minutes with enough traffic to make the sample meaningful."
+          investigation: "Check agent-api CPU/memory, request latency panels, recent deployments, and whether eval or synthetic traffic is causing contention."
+          dashboard: "Grafana Agent Monitoring: latency"
+
+      - alert: CriticalAskLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(agent_request_latency_seconds_bucket{route="/ask"}[5m])
+            )
+          ) > 2.5
+          and
+          sum(increase(agent_requests_total{route="/ask"}[5m])) >= 20
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical /ask latency"
+          description: "p95 /ask latency has been above 2.5 seconds for 10 minutes with enough traffic to indicate sustained user impact."
+          investigation: "Check agent-api logs, host resource pressure, container restarts, dependency errors, and recent deployment manifests."
+          dashboard: "Grafana Agent Monitoring: latency"
+
+  - name: agent-api-behavior
+    rules:
+      # Synthetic traffic defaults to about 15% rejection-triggering prompts.
+      # 35% catches meaningful behavior drift; 60% means the service is
+      # rejecting most traffic. These rules use rate[5m] plus for: 10m so they
+      # are stable without making the alert slower than necessary.
+      #
+      # These behavior alerts become active after Task 3 adds:
+      # agent_rejections_total{prompt_version, reason}
       - alert: HighRejectionRate
-        expr: vector(0) > 1
-        for: 5m
+        expr: |
+          (
+            sum(rate(agent_rejections_total[5m]))
+            /
+            sum(rate(agent_requests_total{route="/ask"}[5m]))
+          ) > 0.35
+          and
+          sum(increase(agent_requests_total{route="/ask"}[10m])) >= 30
+        for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "TODO"
-          description: "TODO"
+          summary: "High rejection rate"
+          description: "More than 35% of /ask traffic is being rejected for a sustained period, above the expected synthetic baseline of about 15%."
+          investigation: "Check recent deployments, prompt_version changes, rejection reason breakdown, and whether traffic has shifted toward adversarial prompts."
+          dashboard: "Grafana Agent Monitoring: rejections by reason"
 
-      # TODO: Implement alerting for sudden changes in rejection behavior
-      # Consider: What constitutes a "spike" vs normal variance?
-      #           How do you compare current behavior to baseline?
+      - alert: VeryHighRejectionRate
+        expr: |
+          (
+            sum(rate(agent_rejections_total[5m]))
+            /
+            sum(rate(agent_requests_total{route="/ask"}[5m]))
+          ) > 0.60
+          and
+          sum(increase(agent_requests_total{route="/ask"}[10m])) >= 30
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Very high rejection rate"
+          description: "More than 60% of /ask traffic is being rejected for a sustained period, meaning the service is rejecting most requests."
+          investigation: "Treat as possible prompt/classifier regression, attack traffic, or severe over-rejection. Compare deployment manifest, eval results, and rejection reasons."
+          dashboard: "Grafana Agent Monitoring: rejections by reason"
+
       - alert: RejectionRateSpike
-        expr: vector(0) > 1
+        expr: |
+          (
+            sum(rate(agent_rejections_total[5m]))
+            /
+            sum(rate(agent_requests_total{route="/ask"}[5m]))
+          )
+          >
+          2 *
+          (
+            sum(rate(agent_rejections_total[30m] offset 5m))
+            /
+            sum(rate(agent_requests_total{route="/ask"}[30m] offset 5m))
+          )
+          and
+          (
+            sum(rate(agent_rejections_total[5m]))
+            /
+            sum(rate(agent_requests_total{route="/ask"}[5m]))
+          ) > 0.30
+          and
+          (
+            sum(rate(agent_rejections_total[30m] offset 5m))
+            /
+            sum(rate(agent_requests_total{route="/ask"}[30m] offset 5m))
+          ) > 0.05
+          and
+          sum(increase(agent_requests_total{route="/ask"}[10m])) >= 30
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "TODO"
-          description: "TODO"
+          summary: "Rejection rate spike"
+          description: "Current 5-minute rejection rate is more than 2x the prior 30-minute baseline, above 30% absolute, and backed by enough traffic."
+          investigation: "Compare current rejection reasons to the previous baseline and check whether traffic mix, prompt_version, or classifier behavior changed."
+          dashboard: "Grafana Agent Monitoring: rejection rate and reason breakdown"
+
+      - alert: HighRejectionsByReason
+        expr: |
+          (
+            sum by (reason, prompt_version) (
+              increase(agent_rejections_total[10m])
+            )
+            /
+            ignoring(reason) group_left
+            sum by (prompt_version) (
+              increase(agent_requests_total{route="/ask"}[10m])
+            )
+          ) > 0.25
+          and
+          sum by (reason, prompt_version) (
+            increase(agent_rejections_total[10m])
+          ) >= 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High {{ $labels.reason }} rejections"
+          description: "Rejection reason {{ $labels.reason }} for prompt version {{ $labels.prompt_version }} accounts for more than 25% of /ask traffic with at least 10 events."
+          investigation: "Use the reason label to separate likely prompt injection, secrets request, and dangerous action patterns before escalating."
+          dashboard: "Grafana Agent Monitoring: rejections by reason"

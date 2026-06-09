@@ -1,38 +1,31 @@
-# CI validates these rules before deployment. Thresholds here are starter SLO
-# defaults until real production baselines exist; tune by environment, traffic
-# source, customer segment, and prompt/classifier version as the service matures.
-# Environment and Grafana links come from Prometheus external_labels so the same
-# rule file works for the local stack and optional production deployment.
+# Prometheus alerts are the runtime counterpart to the CI quality gate:
+# CI evals prove behavior before deployment, while these rules watch for
+# production behavior that needs human attention after deployment.
+#
+# Metric contract used here:
+# - Existing: agent_requests_total{route, prompt_version}
+# - Existing: agent_request_latency_seconds_bucket{route, prompt_version, le}
+# - Task 3:  agent_rejections_total{prompt_version, reason}
 
 groups:
   - name: agent-api-availability
     rules:
-      - alert: AgentAPIScrapeFailed
-        expr: up{job="agent-api"} == 0
+      - alert: AgentAPIDown
+        expr: up{job="agent-api"} == 0 or absent(up{job="agent-api"})
         for: 1m
         labels:
-          severity: page
-          team: platform
-          environment: '{{ $externalLabels.environment }}'
+          severity: critical
         annotations:
-          summary: "Agent API scrape failed"
-          description: "Prometheus cannot scrape at least one agent-api target for more than 1 minute."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=8"
-          runbook_url: "docs/incident-response.md#confirm-the-alert-is-real"
+          summary: "Agent API is unavailable"
+          description: "Prometheus cannot scrape the agent-api target, or the target is missing from discovery, for more than 1 minute."
+          investigation: "Check docker compose service status, agent-api logs, Prometheus targets, and the /healthz endpoint."
+          dashboard: "Grafana Agent Monitoring: service availability"
 
-      - alert: AgentAPIMissingMetrics
-        expr: absent_over_time(agent_requests_total[10m])
-        for: 2m
-        labels:
-          severity: ticket
-          team: platform
-          environment: '{{ $externalLabels.environment }}'
-        annotations:
-          summary: "Agent API request metric is missing"
-          description: "agent_requests_total has been absent for 10 minutes. This usually means instrumentation changed, scraping broke, or the service stopped receiving traffic."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring"
-          runbook_url: "docs/incident-response.md#confirm-the-alert-is-real"
-
+  - name: agent-api-traffic
+    rules:
+      # Zero /ask traffic is alert-worthy in this repo because the traffic
+      # generator is intentionally continuous. In a customer-facing app, quiet
+      # periods may be normal and this threshold would need a traffic schedule.
       - alert: AskTrafficAbsent
         expr: |
           (
@@ -42,233 +35,138 @@ groups:
           absent_over_time(agent_requests_total{route="/ask"}[5m])
         for: 5m
         labels:
-          severity: ticket
-          team: api
-          environment: '{{ $externalLabels.environment }}'
+          severity: warning
         annotations:
           summary: "No /ask traffic observed"
-          description: "No /ask requests have been observed for a sustained period. This is ticket-level unless synthetic traffic should be continuous in this environment."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=1"
-          runbook_url: "docs/incident-response.md#determine-user-impact"
-
-  - name: agent-api-slo-burn
-    rules:
-      - alert: AgentAPIAvailabilityBurnRateFast
-        expr: |
-          (
-            sum(rate(agent_request_outcomes_total{route="/ask",status_code=~"5.."}[5m]))
-            /
-            clamp_min(sum(rate(agent_request_outcomes_total{route="/ask"}[5m])), 1e-9)
-          ) > (14.4 * 0.001)
-          and
-          (
-            sum(rate(agent_request_outcomes_total{route="/ask",status_code=~"5.."}[30m]))
-            /
-            clamp_min(sum(rate(agent_request_outcomes_total{route="/ask"}[30m])), 1e-9)
-          ) > (6 * 0.001)
-        for: 2m
-        labels:
-          severity: page
-          team: api
-          environment: '{{ $externalLabels.environment }}'
-          slo: availability
-        annotations:
-          summary: "Fast availability SLO burn"
-          description: "/ask 5xx error ratio is burning a 99.9% availability budget quickly across 5m and 30m windows."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=9"
-          runbook_url: "docs/incident-response.md#check-invalid-requests-and-outcomes"
-
-      - alert: AgentAPILatencyBurnRateFast
-        expr: |
-          (
-            1 -
-            (
-              sum(rate(agent_request_latency_seconds_bucket{route="/ask",le="1.0"}[5m]))
-              /
-              clamp_min(sum(rate(agent_request_latency_seconds_count{route="/ask"}[5m])), 1e-9)
-            )
-          ) > (14.4 * 0.05)
-          and
-          (
-            1 -
-            (
-              sum(rate(agent_request_latency_seconds_bucket{route="/ask",le="1.0"}[30m]))
-              /
-              clamp_min(sum(rate(agent_request_latency_seconds_count{route="/ask"}[30m])), 1e-9)
-            )
-          ) > (6 * 0.05)
-        for: 2m
-        labels:
-          severity: page
-          team: api
-          environment: '{{ $externalLabels.environment }}'
-          slo: latency
-        annotations:
-          summary: "Fast latency SLO burn"
-          description: "More than the allowed share of /ask requests are slower than 1 second across 5m and 30m windows."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=4"
-          runbook_url: "docs/incident-response.md#check-latency-and-resource-pressure"
-
-  - name: agent-api-errors
-    rules:
-      - alert: AgentAPIErrorRateHigh
-        expr: |
-          (
-            sum(rate(agent_request_outcomes_total{route="/ask",status_code=~"5.."}[5m]))
-            /
-            clamp_min(sum(rate(agent_request_outcomes_total{route="/ask"}[5m])), 1e-9)
-          ) > 0.02
-          and
-          sum(increase(agent_request_outcomes_total{route="/ask"}[10m])) >= 30
-        for: 5m
-        labels:
-          severity: page
-          team: api
-          environment: '{{ $externalLabels.environment }}'
-        annotations:
-          summary: "High /ask error rate"
-          description: "More than 2% of /ask traffic is returning 5xx responses with enough traffic to indicate user impact."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=9"
-          runbook_url: "docs/incident-response.md#check-invalid-requests-and-outcomes"
-
-      - alert: AgentAPIInvalidRequestRateHigh
-        expr: |
-          (
-            sum(rate(agent_invalid_requests_total{route="/ask"}[5m]))
-            /
-            clamp_min(sum(rate(agent_requests_total{route="/ask"}[5m])), 1e-9)
-          ) > 0.10
-          and
-          sum(increase(agent_requests_total{route="/ask"}[10m])) >= 30
-        for: 10m
-        labels:
-          severity: ticket
-          team: product
-          environment: '{{ $externalLabels.environment }}'
-        annotations:
-          summary: "High invalid request rate"
-          description: "More than 10% of /ask traffic is malformed or schema-invalid, suggesting client integration drift or abuse traffic."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=10"
-          runbook_url: "docs/incident-response.md#check-invalid-requests-and-outcomes"
+          description: "No /ask requests have been observed for a sustained period, even though synthetic traffic should be continuous."
+          investigation: "Check traffic-generator logs, Docker Compose networking, /ask route behavior, and whether request metric labels changed."
+          dashboard: "Grafana Agent Monitoring: request throughput"
 
   - name: agent-api-latency
     rules:
+      # Volume guards avoid p95 alerts from one or two slow requests during a
+      # low-sample interval. The warning catches user-visible slowness; the
+      # critical alert waits longer and uses a higher threshold to reduce pages
+      # from brief startup or CPU-contention spikes.
       - alert: AskLatencyHigh
         expr: |
           histogram_quantile(
             0.95,
-            sum by (le, prompt_version) (
+            sum by (le) (
               rate(agent_request_latency_seconds_bucket{route="/ask"}[5m])
             )
           ) > 1
-          and on()
+          and
           sum(increase(agent_requests_total{route="/ask"}[5m])) >= 20
         for: 5m
         labels:
-          severity: ticket
-          team: api
-          environment: '{{ $externalLabels.environment }}'
+          severity: warning
         annotations:
           summary: "High /ask latency"
           description: "p95 /ask latency has been above 1 second for 5 minutes with enough traffic to make the sample meaningful."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=4"
-          runbook_url: "docs/incident-response.md#check-latency-and-resource-pressure"
+          investigation: "Check agent-api CPU/memory, request latency panels, recent deployments, and whether eval or synthetic traffic is causing contention."
+          dashboard: "Grafana Agent Monitoring: latency"
 
       - alert: CriticalAskLatencyHigh
         expr: |
           histogram_quantile(
             0.95,
-            sum by (le, prompt_version) (
+            sum by (le) (
               rate(agent_request_latency_seconds_bucket{route="/ask"}[5m])
             )
           ) > 2.5
-          and on()
+          and
           sum(increase(agent_requests_total{route="/ask"}[5m])) >= 20
         for: 10m
         labels:
-          severity: page
-          team: api
-          environment: '{{ $externalLabels.environment }}'
+          severity: critical
         annotations:
           summary: "Critical /ask latency"
           description: "p95 /ask latency has been above 2.5 seconds for 10 minutes with enough traffic to indicate sustained user impact."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=4"
-          runbook_url: "docs/incident-response.md#check-latency-and-resource-pressure"
+          investigation: "Check agent-api logs, host resource pressure, container restarts, dependency errors, and recent deployment manifests."
+          dashboard: "Grafana Agent Monitoring: latency"
 
-  - name: agent-api-safety
+  - name: agent-api-behavior
     rules:
+      # Synthetic traffic defaults to about 15% rejection-triggering prompts.
+      # 35% catches meaningful behavior drift; 60% means the service is
+      # rejecting most traffic. These rules use rate[5m] plus for: 10m so they
+      # are stable without making the alert slower than necessary.
+      #
+      # These behavior alerts become active after Task 3 adds:
+      # agent_rejections_total{prompt_version, reason}
       - alert: HighRejectionRate
         expr: |
           (
-            sum by (prompt_version) (rate(agent_rejections_total[5m]))
+            sum(rate(agent_rejections_total[5m]))
             /
-            clamp_min(sum by (prompt_version) (rate(agent_requests_total{route="/ask"}[5m])), 1e-9)
+            sum(rate(agent_requests_total{route="/ask"}[5m]))
           ) > 0.35
-          and on()
+          and
           sum(increase(agent_requests_total{route="/ask"}[10m])) >= 30
         for: 10m
         labels:
-          severity: ticket
-          team: safety
-          environment: '{{ $externalLabels.environment }}'
+          severity: warning
         annotations:
-          summary: "High rejection rate for prompt version {{ $labels.prompt_version }}"
-          description: "More than 35% of /ask traffic is being rejected for a prompt version. Tune this by real production source/customer baselines."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=2"
-          runbook_url: "docs/incident-response.md#inspect-the-rejection-breakdown"
+          summary: "High rejection rate"
+          description: "More than 35% of /ask traffic is being rejected for a sustained period, above the expected synthetic baseline of about 15%."
+          investigation: "Check recent deployments, prompt_version changes, rejection reason breakdown, and whether traffic has shifted toward adversarial prompts."
+          dashboard: "Grafana Agent Monitoring: rejections by reason"
 
       - alert: VeryHighRejectionRate
         expr: |
           (
-            sum by (prompt_version) (rate(agent_rejections_total[5m]))
+            sum(rate(agent_rejections_total[5m]))
             /
-            clamp_min(sum by (prompt_version) (rate(agent_requests_total{route="/ask"}[5m])), 1e-9)
+            sum(rate(agent_requests_total{route="/ask"}[5m]))
           ) > 0.60
-          and on()
+          and
           sum(increase(agent_requests_total{route="/ask"}[10m])) >= 30
         for: 10m
         labels:
-          severity: page
-          team: safety
-          environment: '{{ $externalLabels.environment }}'
+          severity: critical
         annotations:
-          summary: "Very high rejection rate for prompt version {{ $labels.prompt_version }}"
-          description: "More than 60% of /ask traffic is being rejected for a prompt version, meaning the service may be blocking most users or seeing active abuse."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=2"
-          runbook_url: "docs/incident-response.md#mitigate-immediately-when"
+          summary: "Very high rejection rate"
+          description: "More than 60% of /ask traffic is being rejected for a sustained period, meaning the service is rejecting most requests."
+          investigation: "Treat as possible prompt/classifier regression, attack traffic, or severe over-rejection. Compare deployment manifest, eval results, and rejection reasons."
+          dashboard: "Grafana Agent Monitoring: rejections by reason"
 
       - alert: RejectionRateSpike
         expr: |
           (
             sum(rate(agent_rejections_total[5m]))
             /
-            clamp_min(sum(rate(agent_requests_total{route="/ask"}[5m])), 1e-9)
+            sum(rate(agent_requests_total{route="/ask"}[5m]))
           )
           >
           2 *
           (
             sum(rate(agent_rejections_total[30m] offset 5m))
             /
-            clamp_min(sum(rate(agent_requests_total{route="/ask"}[30m] offset 5m)), 1e-9)
+            sum(rate(agent_requests_total{route="/ask"}[30m] offset 5m))
           )
           and
           (
             sum(rate(agent_rejections_total[5m]))
             /
-            clamp_min(sum(rate(agent_requests_total{route="/ask"}[5m])), 1e-9)
+            sum(rate(agent_requests_total{route="/ask"}[5m]))
           ) > 0.30
+          and
+          (
+            sum(rate(agent_rejections_total[30m] offset 5m))
+            /
+            sum(rate(agent_requests_total{route="/ask"}[30m] offset 5m))
+          ) > 0.05
           and
           sum(increase(agent_requests_total{route="/ask"}[10m])) >= 30
         for: 5m
         labels:
-          severity: ticket
-          team: safety
-          environment: '{{ $externalLabels.environment }}'
+          severity: warning
         annotations:
           summary: "Rejection rate spike"
-          description: "Current rejection rate is more than 2x the prior 30-minute baseline and above 30% absolute."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=2"
-          runbook_url: "docs/incident-response.md#inspect-the-rejection-breakdown"
+          description: "Current 5-minute rejection rate is more than 2x the prior 30-minute baseline, above 30% absolute, and backed by enough traffic."
+          investigation: "Compare current rejection reasons to the previous baseline and check whether traffic mix, prompt_version, or classifier behavior changed."
+          dashboard: "Grafana Agent Monitoring: rejection rate and reason breakdown"
 
       - alert: HighRejectionsByReason
         expr: |
@@ -278,11 +176,8 @@ groups:
             )
             /
             ignoring(reason) group_left
-            clamp_min(
-              sum by (prompt_version) (
-                increase(agent_requests_total{route="/ask"}[10m])
-              ),
-              1
+            sum by (prompt_version) (
+              increase(agent_requests_total{route="/ask"}[10m])
             )
           ) > 0.25
           and
@@ -291,62 +186,9 @@ groups:
           ) >= 10
         for: 5m
         labels:
-          severity: ticket
-          team: safety
-          environment: '{{ $externalLabels.environment }}'
+          severity: warning
         annotations:
           summary: "High {{ $labels.reason }} rejections"
           description: "Rejection reason {{ $labels.reason }} for prompt version {{ $labels.prompt_version }} accounts for more than 25% of /ask traffic with at least 10 events."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring?viewPanel=3"
-          runbook_url: "docs/incident-response.md#inspect-the-rejection-breakdown"
-
-  - name: agent-api-saturation
-    rules:
-      - alert: AgentAPIContainerCPUHigh
-        expr: |
-          sum by (name) (
-            rate(container_cpu_usage_seconds_total{name=~"agent-api.*"}[5m])
-          ) > 0.85
-        for: 10m
-        labels:
-          severity: ticket
-          team: platform
-          environment: '{{ $externalLabels.environment }}'
-        annotations:
-          summary: "Agent API container CPU is high"
-          description: "An agent-api container has consumed more than 0.85 CPU cores for 10 minutes. Requires cAdvisor metrics."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring"
-          runbook_url: "docs/incident-response.md#check-latency-and-resource-pressure"
-
-      - alert: AgentAPIContainerMemoryHigh
-        expr: |
-          (
-            container_memory_working_set_bytes{name=~"agent-api.*"}
-            /
-            clamp_min(container_spec_memory_limit_bytes{name=~"agent-api.*"}, 1)
-          ) > 0.85
-          and
-          container_spec_memory_limit_bytes{name=~"agent-api.*"} > 0
-        for: 10m
-        labels:
-          severity: ticket
-          team: platform
-          environment: '{{ $externalLabels.environment }}'
-        annotations:
-          summary: "Agent API container memory is high"
-          description: "An agent-api container is using more than 85% of its memory limit for 10 minutes. Requires cAdvisor metrics."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring"
-          runbook_url: "docs/incident-response.md#check-latency-and-resource-pressure"
-
-      - alert: AgentAPIContainerRestarted
-        expr: changes(container_start_time_seconds{name=~"agent-api.*"}[15m]) > 0
-        for: 0m
-        labels:
-          severity: ticket
-          team: platform
-          environment: '{{ $externalLabels.environment }}'
-        annotations:
-          summary: "Agent API container restarted"
-          description: "An agent-api container restart was detected in the last 15 minutes. Requires cAdvisor metrics."
-          dashboard_url: "{{ $externalLabels.grafana_base_url }}/d/agent-monitoring/agent-api-monitoring"
-          runbook_url: "docs/incident-response.md#check-logs-and-service-status"
+          investigation: "Use the reason label to separate likely prompt injection, secrets request, and dangerous action patterns before escalating."
+          dashboard: "Grafana Agent Monitoring: rejections by reason"

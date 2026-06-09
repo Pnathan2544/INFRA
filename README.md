@@ -1,4 +1,4 @@
-# AI-Ops Agent API
+# AI-Ops Agent API - Natsongwat Yorsangrat
 
 This repository is a self-contained DevOps + AIOps exercise. It runs a small
 LLM-style Agent API, synthetic traffic generator, Prometheus, Grafana, and an

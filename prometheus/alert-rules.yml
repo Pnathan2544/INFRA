@@ -1,11 +1,11 @@
-# Prometheus alerts are the runtime counterpart to the CI quality gate:
-# CI evals prove behavior before deployment, while these rules watch for
-# production behavior that needs human attention after deployment.
+# Alerts cover runtime signals CI cannot: availability, traffic, latency,
+# server errors, and rejection behavior.
 #
 # Metric contract used here:
-# - Existing: agent_requests_total{route, prompt_version}
-# - Existing: agent_request_latency_seconds_bucket{route, prompt_version, le}
-# - Task 3:  agent_rejections_total{prompt_version, reason}
+# - agent_requests_total{route, prompt_version}
+# - agent_rejections_total{prompt_version, reason}
+# - agent_request_outcomes_total{route, status_code, outcome, prompt_version}
+# - agent_request_latency_seconds_bucket{route, prompt_version, le}
 
 groups:
   - name: agent-api-availability
@@ -23,9 +23,7 @@ groups:
 
   - name: agent-api-traffic
     rules:
-      # Zero /ask traffic is alert-worthy in this repo because the traffic
-      # generator is intentionally continuous. In a customer-facing app, quiet
-      # periods may be normal and this threshold would need a traffic schedule.
+      # The traffic generator should produce continuous /ask traffic in this repo.
       - alert: AskTrafficAbsent
         expr: |
           (
@@ -44,10 +42,7 @@ groups:
 
   - name: agent-api-latency
     rules:
-      # Volume guards avoid p95 alerts from one or two slow requests during a
-      # low-sample interval. The warning catches user-visible slowness; the
-      # critical alert waits longer and uses a higher threshold to reduce pages
-      # from brief startup or CPU-contention spikes.
+      # Volume guards keep p95 alerts from firing on tiny samples.
       - alert: AskLatencyHigh
         expr: |
           histogram_quantile(
@@ -86,15 +81,28 @@ groups:
           investigation: "Check agent-api logs, host resource pressure, container restarts, dependency errors, and recent deployment manifests."
           dashboard: "Grafana Agent Monitoring: latency"
 
+  - name: agent-api-errors
+    rules:
+      # Unexpected errors are server-side failures, not normal reject/invalid flows.
+      - alert: AskUnexpectedErrors
+        expr: |
+          sum(
+            increase(agent_request_outcomes_total{route="/ask", outcome="unexpected_error"}[10m])
+          ) >= 3
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unexpected /ask errors observed"
+          description: "At least 3 unexpected /ask errors have occurred in the last 10 minutes."
+          investigation: "Check agent-api logs, recent code changes, malformed edge-case payloads, and whether errors correlate with prompt_version or deployment manifest changes."
+          dashboard: "Grafana Agent Monitoring: request outcomes"
+
   - name: agent-api-behavior
     rules:
       # Synthetic traffic defaults to about 15% rejection-triggering prompts.
-      # 35% catches meaningful behavior drift; 60% means the service is
-      # rejecting most traffic. These rules use rate[5m] plus for: 10m so they
-      # are stable without making the alert slower than necessary.
-      #
-      # These behavior alerts become active after Task 3 adds:
-      # agent_rejections_total{prompt_version, reason}
+      # The 35% and 60% thresholds catch drift without paging on normal mix.
+      # The 30-request guard keeps ratios meaningful at the default traffic rate.
       - alert: HighRejectionRate
         expr: |
           (

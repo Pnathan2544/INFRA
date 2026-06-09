@@ -276,6 +276,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          git fetch origin "${GITHUB_REF_NAME}"
+          remote_sha="$(git rev-parse "origin/${GITHUB_REF_NAME}")"
+          if [[ "$remote_sha" != "${GITHUB_SHA}" ]]; then
+            echo "Remote ${GITHUB_REF_NAME} moved from ${GITHUB_SHA} to ${remote_sha}; skipping stale manifest commit."
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           git add deployment/manifest.yml
           if git diff --cached --quiet; then
             echo "committed=false" >> "$GITHUB_OUTPUT"
@@ -285,8 +293,6 @@ jobs:
           # [skip ci] prevents the manifest update commit from starting a CI loop.
           git commit -m "chore(deploy): update manifest for ${{ steps.trace.outputs.short_sha }} [skip ci]"
 
-          # No force push: if main moved after this run started, fail visibly
-          # instead of recording a stale deployment candidate.
           git push origin "HEAD:${GITHUB_REF_NAME}"
           echo "committed=true" >> "$GITHUB_OUTPUT"
 

@@ -2,6 +2,11 @@
 eval-results/
 
 # Python
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
 __pycache__/
 *.py[cod]
 *$py.class

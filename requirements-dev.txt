@@ -1,0 +1,11 @@
+-r agent-api/requirements.txt
+-r eval-runner/requirements.txt
+-r traffic-generator/requirements.txt
+
+bandit==1.8.6
+mypy==1.10.0
+pip-audit==2.7.3
+pytest==8.2.2
+pytest-cov==5.0.0
+ruff==0.5.0
+types-requests>=2.32.0

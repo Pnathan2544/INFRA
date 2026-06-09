@@ -3,12 +3,14 @@
 # check, but repository settings are what actually block a broken PR.
 name: CI/CD Pipeline
 
+# Event triggers: PRs and pushes to main. The push trigger allows the pipeline to run
 on:
   pull_request:
     branches: [main]
   push:
     branches: [main]
 
+# Granting write access to GITHUB_TOKEN would violate least privilege.
 permissions:
   contents: read
 
@@ -91,13 +93,6 @@ jobs:
           set -euo pipefail
           make up
           docker-compose ps
-
-      - name: Wait for Agent API
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl --fail --retry 30 --retry-all-errors --retry-delay 1 \
-            http://localhost:8080/healthz >/dev/null
 
       - name: Run health and smoke checks
         shell: bash

@@ -85,6 +85,30 @@ jobs:
           jq --version
           docker-compose config >/dev/null
 
+      - name: Validate Python syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall agent-api eval-runner traffic-generator
+
+      - name: Run API contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r agent-api/requirements.txt
+          python -m unittest discover -s tests
+
+      - name: Validate observability config
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/validate_grafana_dashboards.py
+          docker run --rm \
+            --entrypoint promtool \
+            -v "$PWD/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v2.47.0 \
+            check config /etc/prometheus/prometheus.yml
+
       - name: Build and start stack
         shell: bash
         run: |

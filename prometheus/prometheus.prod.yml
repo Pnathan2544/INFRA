@@ -2,8 +2,9 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
   external_labels:
-    environment: local
-    grafana_base_url: http://localhost:3000
+    environment: production
+    # Replace with the real Grafana URL for the deployed environment.
+    grafana_base_url: https://grafana.example.com
 
 alerting:
   alertmanagers:
@@ -19,7 +20,13 @@ scrape_configs:
       - targets: ['localhost:9090']
 
   - job_name: 'agent-api'
-    static_configs:
-      - targets: ['agent-api:8080']
     metrics_path: /metrics
     scrape_interval: 5s
+    static_configs:
+      - targets:
+          - 'agent-api-1:8080'
+          - 'agent-api-2:8080'
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']

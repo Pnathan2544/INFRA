@@ -1,0 +1,54 @@
+# Local/development Alertmanager routing. Receiver names mirror production
+# ownership, but notification configs are intentionally omitted so reviewers can
+# run the stack without outbound webhooks or fake failing endpoints.
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'team', 'environment']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: ticket-api
+  routes:
+    - matchers:
+        - severity="page"
+      receiver: pager-primary
+      repeat_interval: 30m
+    - matchers:
+        - team="safety"
+        - severity="ticket"
+      receiver: ticket-safety
+      repeat_interval: 12h
+    - matchers:
+        - team="platform"
+        - severity="ticket"
+      receiver: ticket-platform
+      repeat_interval: 12h
+    - matchers:
+        - team="product"
+        - severity="ticket"
+      receiver: ticket-product
+      repeat_interval: 12h
+    - matchers:
+        - severity="ticket"
+      receiver: ticket-api
+      repeat_interval: 12h
+
+inhibit_rules:
+  - source_matchers:
+      - severity="page"
+    target_matchers:
+      - severity="ticket"
+    equal: ['alertname', 'environment']
+
+receivers:
+  - name: pager-primary
+
+  - name: ticket-api
+
+  - name: ticket-safety
+
+  - name: ticket-platform
+
+  - name: ticket-product

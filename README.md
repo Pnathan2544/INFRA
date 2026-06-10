@@ -103,6 +103,8 @@ docker-compose run --rm eval-runner
 | Prometheus targets | http://localhost:9090/targets | none | Confirms scrape health. |
 | Grafana | http://localhost:3000 | `admin/admin` | Dashboard: `Agent API Monitoring`. |
 
+NOTE: Grafana credential MUST be changed in production
+
 ## Architecture
 
 ```text

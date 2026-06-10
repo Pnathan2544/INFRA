@@ -495,6 +495,26 @@ CI:
 - Confirm `deployment/manifest.yml` updates only on push to `main` and remains
   traceable to the source commit.
 
+## Stress Testing 
+
+Stress-testing has been done to the local observability stack to verify that `agent-api`, Prometheus, and Grafana behave correctly under normal, invalid, and high-rejection traffic.
+
+The stack stayed healthy throughout testing. `agent-api`, Prometheus, Grafana, and `traffic-generator` were all running, `/healthz` returned healthy, and `/metrics` exposed the expected `agent_*` metrics.
+
+Invalid request testing was done manually. Missing-message and malformed-JSON payloads were sent to `/ask`, and the API correctly recorded them as `invalid_request` outcomes with HTTP `400`. The invalid request counters showed both `missing_message` and `malformed_json` reasons.
+
+High-rejection testing was done by temporarily recreating `traffic-generator` with `REJECTION_MIX_RATIO=0.80`. The short-window rejection rate rose to about `57%`, confirming that the rejection-rate PromQL and dashboard panels respond to adversarial traffic. After restoring `REJECTION_MIX_RATIO=0.15`, the rejection rate returned near the expected baseline at about `13.8%`.
+
+Prometheus configuration and alert rules passed `promtool` validation, with `9` rules found. The Grafana dashboard JSON also passed the repository dashboard validator. No Prometheus alerts remained firing after the stress test completed.
+
+A few testing notes came up:
+
+- PowerShell quoting can mangle PromQL label matchers when using `curl --data-urlencode`; `Invoke-RestMethod` with a form body was more reliable.
+- Newly-created Prometheus counter series may show `0` for `increase()` until a second scrape/sample exists. Raw counters were correct, and a second invalid-request burst produced the expected PromQL deltas.
+- Docker Compose warns that top-level `version: '3.8'` is obsolete; this is harmless but can be cleaned up later.
+
+Overall, the stress test passed. Metrics, PromQL queries, dashboard panels, and alert-rule validation behaved as expected.
+
 ## References
 
 - Candidate prompt: `CANDIDATE_INSTRUCTIONS.md`

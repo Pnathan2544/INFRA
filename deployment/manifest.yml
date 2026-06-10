@@ -11,12 +11,12 @@ kind: deployment
 metadata:
   name: agent-api
   environment: production
-  commit_sha: "56aca0e5ccc185d9c3a1ecbc65a10a3d053bb36e"
-  short_sha: "56aca0e"
+  commit_sha: "e1244a476673b00cb2e8e2d210f1bbec6bdc0bdf"
+  short_sha: "e1244a4"
   deployed_by: "Pnathan2544"
-  deployed_at: "2026-06-09T21:12:56Z"
-  workflow_run_id: "27235575613"
-  workflow_run_number: "6"
+  deployed_at: "2026-06-10T06:35:03Z"
+  workflow_run_id: "27257933083"
+  workflow_run_number: "7"
   source_branch: "main"
 
 spec:
@@ -24,7 +24,7 @@ spec:
 
   container:
     name: agent-api
-    image_tag: "56aca0e5ccc185d9c3a1ecbc65a10a3d053bb36e"
+    image_tag: "e1244a476673b00cb2e8e2d210f1bbec6bdc0bdf"
     port: 8080
 
     env:
@@ -44,6 +44,7 @@ spec:
 # -------------------------------------------------------------
 # | Timestamp | Commit SHA | Deployed By |
 # -------------------------------------------------------------
+# | 2026-06-10T06:35:03Z | e1244a476673b00cb2e8e2d210f1bbec6bdc0bdf | Pnathan2544 |
 # | 2026-06-09T21:12:56Z | 56aca0e5ccc185d9c3a1ecbc65a10a3d053bb36e | Pnathan2544 |
 # | 2026-06-09T20:51:52Z | 7e7612b564000c38997a5817396be4c579486a4d | Pnathan2544 |
 # | 2026-06-09T19:33:53Z | f9023c15464c6bba831b26d4df43fba9d57227cc | Pnathan2544 |

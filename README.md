@@ -24,6 +24,8 @@ deployment traceability, and a runbook an on-call engineer can follow.
 - [Solution Documentation](#solution-documentation)
 - [Future Improvements](#future-improvements)
 - [Verification Checklist](#verification-checklist)
+- [Stress Testing](#stress-testing)
+- [Reference](#reference)
 
 ## Setup
 

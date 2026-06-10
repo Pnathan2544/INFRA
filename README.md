@@ -6,11 +6,9 @@ on-demand evaluation runner. The solution focuses on operational readiness:
 quality gates, traceable deployment metadata, useful metrics, actionable alerts,
 dashboards, and incident response.
 
-The implementation is intentionally scoped to a local Docker Compose stack. It
-does not pretend to be a full production platform, but it establishes the
-contracts a production system would need: bounded metrics, behavioral eval
-gates, alert thresholds with rationale, deployment traceability, and a runbook
-an on-call engineer can follow.
+The implementation is intentionally scoped to a local Docker Compose stack.
+However, it has bounded metrics, behavioral eval gates, alert thresholds with rationale, 
+deployment traceability, and a runbook an on-call engineer can follow.
 
 ## Contents
 
@@ -216,8 +214,9 @@ curl.exe -s http://localhost:8080/healthz
 
 ## Rejection Logic
 
-The classifier is deterministic regex logic in `agent-api/app.py`. It is simple
-by design so CI tests, alert thresholds, and runbook examples are repeatable.
+Regex logic for rule-based prompt classifier in `agent-api/app.py`. This is for
+auditability and guaranteed safety for CI tests, alert thresholds, and 
+runbook examples to be repeatable.
 
 | Reason | Example Trigger Patterns |
 | --- | --- |
@@ -346,8 +345,7 @@ The quality gate validates:
 On push to `main`, `package-deployment` updates `deployment/manifest.yml` with
 source commit SHA, short SHA, branch, workflow run ID, actor, timestamp, prompt
 version, healthcheck, and resource intent. This gives traceability from source
-commit to deployment candidate without pretending there is a live production
-cluster attached to the exercise.
+commit to deployment candidate.
 
 ### Task 2: Alerting Strategy
 
